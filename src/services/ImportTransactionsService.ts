@@ -1,7 +1,10 @@
 import csvParse from 'csv-parse';
 import fs from 'fs';
+import { getRepository, In } from 'typeorm';
 import Transaction from '../models/Transaction';
 import CreateTransactionService from './CreateTransactionService';
+import CreateCategoryService from './CreateCategoryService';
+import Category from '../models/Category';
 
 interface CreateTransaction {
   title: string;
@@ -22,6 +25,7 @@ class ImportTransactionsService {
 
     const parseCSV = readCSVStream.pipe(parseStream);
     const createTransactions = Array<CreateTransaction>();
+    const categoriesAll = Array<string>();
 
     parseCSV.on('data', line => {
       createTransactions.push({
@@ -30,27 +34,54 @@ class ImportTransactionsService {
         type: line[1],
         category: line[3],
       });
+
+      categoriesAll.push(line[3]);
     });
 
     await new Promise(resolve => {
       parseCSV.on('end', resolve);
     });
 
-    const createTransactionService = new CreateTransactionService();
-    const transactions = Array<Transaction>();
+    // retira a repetição das categorias
+    const categoriesUnique = Array.from(new Set(categoriesAll));
 
-    const promise = createTransactions.map(async item => {
-      transactions.push(
-        await createTransactionService.execute({
-          title: item.title,
-          category: item.category,
-          type: item.type,
-          value: item.value,
-        }),
-      );
+    // Cadastra as categorias que ainda nao existem no banco
+    const categoriesRepository = getRepository(Category);
+    const categories = Array<Category>();
+    const promise1 = categoriesUnique.map(async item => {
+      const existe = await categoriesRepository.findOne({
+        where: { title: item.trim() },
+      });
+
+      if (!existe) {
+        const category = await categoriesRepository.create({
+          title: item.trim(),
+        });
+
+        await categoriesRepository.save(category);
+
+        categories.push(category);
+      } else {
+        categories.push(existe);
+      }
     });
 
-    await Promise.all(promise);
+    await Promise.all(promise1);
+
+    // Adicona as transações
+    const transactionsRepository = getRepository(Transaction);
+    const transactions = await transactionsRepository.create(
+      createTransactions.map(item => ({
+        title: item.title,
+        type: item.type,
+        value: item.value,
+        category: categories.find(
+          category => category.title === item.category.trim(),
+        ),
+      })),
+    );
+
+    await transactionsRepository.save(transactions);
 
     return transactions;
   }
